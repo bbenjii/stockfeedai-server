@@ -24,6 +24,7 @@ from fastapi import Query
 from typing import Any, Dict
 import re
 
+
 @app.get("/article/{article_slug}")
 async def search_article(article_slug: str):
     # Escape slug to avoid regex injection
