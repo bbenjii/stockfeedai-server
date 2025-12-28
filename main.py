@@ -154,10 +154,10 @@ async def get_stock_history(ticker: str,
         return period_settings_map.get(period, {})
     
     period_settings = get_period_settings(period)
-
+    
     stock_history = marketdata_service.get_stock_history(symbol=ticker, **get_period_settings(period))
     return JSONResponse(content={"history": stock_history}, status_code=200)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host='0.0.0.0', port=8000)
+    uvicorn.run("main:app", host='0.0.0.0', port=9000, reload=False)
