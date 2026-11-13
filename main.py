@@ -8,7 +8,10 @@ from fastapi.responses import JSONResponse
 import re
 from datetime import datetime, timedelta, timezone, date
 
+from services.most_mentioned import router as most_mentioned_router
+
 app = FastAPI()
+app.include_router(most_mentioned_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten later
