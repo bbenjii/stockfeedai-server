@@ -16,6 +16,7 @@ from pymongo import InsertOne, UpdateOne
 from starlette import status
 
 from utils import function_timer, logger
+from .stock_catalog_recovery import repair_catalog
 
 logger.setLevel("INFO")
 
@@ -73,158 +74,13 @@ class YahooStockMarket:
             self,
             max_symbols: int | None = None,
             chunk_size: int = 50,
-            max_workers: int | None = 8,
+            max_workers: int | None = 2,
     ):
-        pipeline = [
-            {"$unwind": "$tickers"},
-            {"$group": {"_id": "$tickers", "count": {"$sum": 1}}},
-            {"$sort": {"count": -1}},
-            {"$project": {"ticker": "$_id", "_id": 0}},
-        ]
-        if max_symbols:
-            pipeline.append({"$limit": max_symbols})
-
-        symbols = list(self.db.articles.aggregate(pipeline, allowDiskUse=True))
-        symbols_names = [s["ticker"].upper().strip() for s in symbols if s.get("ticker")]
-
-        if not symbols_names:
-            return {"inserted_or_upserted": 0, "candidates": 0, "missing": 0}
-
-        existing = set(self.db.stocks.distinct("symbol", {"symbol": {"$in": symbols_names}}))
-        untracked = set(self.db.untracked_symbols.distinct("symbol", {"symbol": {"$in": symbols_names}}))
-
-        # only attempt those not in stocks AND not in untracked_symbols
-        missing = [s for s in symbols_names if s not in existing and s not in untracked]
-
-        if not missing:
-            return {
-                "inserted_or_upserted": 0,
-                "candidates": len(symbols_names),
-                "missing": 0,
-                "skipped_untracked": len(untracked),
-            }
-
-        now = datetime.now(timezone.utc)
-
-        if max_workers is None:
-            max_workers = min(16, (os.cpu_count() or 4) * 2)
-
-        operations: list[UpdateOne] = []
-        untracked_ops: list[UpdateOne] = []
-        upserted_total = 0
-        newly_untracked_total = 0
-
-        def flush_stock_ops() -> int:
-            nonlocal operations
-            if not operations:
-                return 0
-            res = self.db.stocks.bulk_write(operations, ordered=False)
-            operations = []
-            return res.upserted_count or 0
-
-        def flush_untracked_ops() -> int:
-            nonlocal untracked_ops
-            if not untracked_ops:
-                return 0
-            res = self.db.untracked_symbols.bulk_write(untracked_ops, ordered=False)
-            untracked_ops = []
-            return res.upserted_count or 0
-
-        def maybe_flush_untracked():
-            nonlocal newly_untracked_total
-            if len(untracked_ops) >= chunk_size:
-                newly_untracked_total += flush_untracked_ops()
-
-        def maybe_flush_stocks():
-            nonlocal upserted_total
-            if len(operations) >= chunk_size:
-                upserted_total += flush_stock_ops()
-
-        def mark_untracked(symbol: str, reason: str | None = None):
-            doc = {"symbol": symbol, "created_at": now}
-            if reason:
-                doc["reason"] = reason
-
-            untracked_ops.append(
-                UpdateOne(
-                    {"symbol": symbol},
-                    {"$setOnInsert": doc},
-                    upsert=True,
-                )
-            )
-            maybe_flush_untracked()
-
-        def fetch(symbol: str):
-            try:
-                return self.get_stock_info(symbol=symbol)
-            except Exception as exc:
-                return ("__error__", symbol, str(exc))
-
-        processed = 0
-        ok = 0
-        failed = 0
-        log_every = 50
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(fetch, s): s for s in missing}
-
-            for fut in as_completed(futures):
-                processed += 1
-                result = fut.result()
-
-                # exception path
-                if isinstance(result, tuple) and result and result[0] == "__error__":
-                    _, symbol, err = result
-                    failed += 1
-                    mark_untracked(symbol, reason=err)
-
-                else:
-                    t = result
-                    if not t:
-                        failed += 1
-                        mark_untracked(futures[fut])  # symbol string
-                    else:
-                        ok += 1
-                        operations.append(
-                            UpdateOne(
-                                {"symbol": t.symbol},
-                                {
-                                    "$setOnInsert": {
-                                        "symbol": t.symbol,
-                                        "name": t.name,
-                                        "currency": t.currency,
-                                        "created_at": now,
-                                    }
-                                },
-                                upsert=True,
-                            )
-                        )
-                        maybe_flush_stocks()
-
-                # regular flushing + progress logging
-                if processed % log_every == 0:
-                    newly_untracked_total += flush_untracked_ops()
-                    upserted_total += flush_stock_ops()
-                    logger.info(
-                        "Processed %s/%s (ok=%s, failed=%s)",
-                        processed, len(missing), ok, failed
-                    )
-
-        # final flush
-        upserted_total += flush_stock_ops()
-        newly_untracked_total += flush_untracked_ops()
-
-        return {
-            "inserted_or_upserted": upserted_total,
-            "newly_untracked": newly_untracked_total,
-            "candidates": len(symbols_names),
-            "missing_attempted": len(missing),
-            "skipped_untracked": len(untracked),
-            "processed": processed,
-            "ok": ok,
-            "failed": failed,
-            "max_workers": max_workers,
-        }
+        # Cold starts only retry a small batch; larger repairs use the explicit CLI.
+        return repair_catalog(
+            self.db, self.get_stock_info, limit=max_symbols or 10,
+            workers=min(max_workers or 2, 8),
+        )
 
     def _dataframe_to_candles(self, df: pd.DataFrame) -> List[MarketCandle]:
         if df.empty:
@@ -328,7 +184,10 @@ class YahooStockMarket:
     def get_stock_symbols(self, search: str = "", limit: int = 10):
         # ---- A: fast path (cached stocks)
         stocks = self._search_stocks_collection(search, limit)
-
+        symbol = search.upper().strip()
+        if not stocks and symbol and self.db.articles.find_one({"tickers": symbol}, {"_id": 1}):
+            repair_catalog(self.db, self.get_stock_info, symbols=[symbol], limit=1, workers=1)
+            stocks = self._search_stocks_collection(search, limit)
         return stocks[:limit]
 
     @staticmethod
