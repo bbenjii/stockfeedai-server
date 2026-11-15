@@ -7,6 +7,7 @@ class Article(BaseModel):
     url: str
     title: str
     content: str
+    source_content_type: Optional[str] = None
     publish_date: Optional[str] = None
     authors: Optional[List[str]] = None
 

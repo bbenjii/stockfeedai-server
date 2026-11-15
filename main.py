@@ -10,7 +10,10 @@ from datetime import datetime, timedelta, timezone, date
 
 from services.most_mentioned import router as most_mentioned_router
 
+from services.events import router as events_router
+
 app = FastAPI()
+app.include_router(events_router)
 app.include_router(most_mentioned_router)
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +29,12 @@ async def root():
 from fastapi import Query
 from typing import Any, Dict
 import re
+
+
+@app.get("/article")
+async def article_by_url(url: str):
+    articles = article_service.get_articles(filter={"url": url}, limit=1)
+    return {"article": articles[0] if articles else None}
 
 
 @app.get("/article/{article_slug}")
