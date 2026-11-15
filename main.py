@@ -60,6 +60,8 @@ async def get_articles(
     tickers: Optional[str] = Query(default=None),
     sectors: Optional[str] = Query(default=None),
     sentiment: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None, max_length=256),
+    include_sources: bool = Query(default=False),
     hours: Optional[int] = Query(default=None, ge=1, le=24*30),
     only_with_tickers: bool = Query(default=True),
     limit: int = Query(default=20, ge=1, le=500),
@@ -123,9 +125,15 @@ async def get_articles(
             mongo_filter["sentiment"] = s
 
     
-    print(mongo_filter)
-    articles = article_service.get_articles(filter=mongo_filter, limit=limit)
-    return JSONResponse(content={"articles": articles}, status_code=200)
+    response = {}
+    if include_sources:
+        response["sources"] = article_service.get_sources(mongo_filter)
+    if source and source.strip():
+        mongo_filter["source"] = {"$regex": rf"^\s*{re.escape(source.strip())}\s*$", "$options": "i"}
+
+    response["articles"] = article_service.get_articles(filter=mongo_filter, limit=limit)
+    return JSONResponse(content=response)
+
 
 
 @app.get("/stock/symbols")

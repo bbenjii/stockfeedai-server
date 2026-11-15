@@ -14,6 +14,15 @@ class ArticleService:
         
         self.collection = db.articles
 
+    def get_sources(self, article_filter: Dict) -> List[str]:
+        sources = self.collection.distinct("source", article_filter)
+        names = {}
+        for source in sources:
+            if isinstance(source, str) and source.strip():
+                name = source.strip()
+                names.setdefault(name.casefold(), name)
+        return sorted(names.values(), key=str.casefold)
+
     def get_articles(
             self,
             filter: Dict | None = None,
